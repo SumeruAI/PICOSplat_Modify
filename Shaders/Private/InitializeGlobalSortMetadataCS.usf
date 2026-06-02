@@ -1,0 +1,44 @@
+/*
+  Copyright (c) 2025 PICO Technology Co., Ltd. See LICENSE.md.
+*/
+
+#include "/Engine/Public/Platform.ush"
+
+#include "../ThirdParty/Public/constants.ush"
+#include "../ThirdParty/Public/unpacking.ush"
+
+float4x4 local_to_clip;
+uint proxy_slot;
+uint global_offset;
+uint num_splats;
+float3 pos_scale_cm;
+float3 pos_min_cm;
+Buffer<uint2> positions;
+RWBuffer<uint> metadata_indices;
+RWBuffer<uint> metadata_distances;
+
+[numthreads(THREAD_GROUP_SIZE_X, 1, 1)] void main(
+	uint3 dispatch_thread_id : SV_DispatchThreadID)
+{
+	if (dispatch_thread_id.x >= num_splats)
+	{
+		return;
+	}
+
+	uint global_index = global_offset + dispatch_thread_id.x;
+	float4 pos_local =
+		unpack_pos(positions[dispatch_thread_id.x], pos_scale_cm, pos_min_cm);
+	float4 pos_clip = mul(pos_local, local_to_clip);
+	bool inside_frustum =
+		!(pos_clip.x < -pos_clip.w || pos_clip.x > pos_clip.w ||
+		  pos_clip.y < -pos_clip.w || pos_clip.y > pos_clip.w ||
+		  pos_clip.z > pos_clip.w);
+	uint distance = inside_frustum
+		? uint(saturate(pos_clip.z / pos_clip.w) * DISTANCE_SCALE)
+		: DISTANCE_NOT_VISIBLE;
+	uint packed_index =
+		(proxy_slot << GLOBAL_SORT_PROXY_SLOT_SHIFT) | dispatch_thread_id.x;
+
+	metadata_indices[global_index] = packed_index;
+	metadata_distances[global_index] = distance;
+}

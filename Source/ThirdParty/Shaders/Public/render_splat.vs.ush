@@ -1,1 +1,176 @@
-C:/work/code/unreal/splat5.4/Plugins/PICOSplat/Source/ThirdParty/splat/shaders/render_splat.vs.hlsl
+/*
+  Copyright (c) 2025 PICO Technology Co., Ltd. See LICENSE.md.
+*/
+
+/**
+ * Required defines:
+ * - WITH_VIEW_ID
+ *
+ * Required shaders constants:
+ * - local_to_world
+ * - splat_scale
+ * - pos_scale_cm
+ * - pos_min_cm
+ *
+ * Required functions:
+ * - world_to_clip: half3 -> half4
+ * - get_render_resolution: () -> half2
+ */
+
+#ifdef GPU_SORT
+Buffer<uint> indices;
+#else
+Buffer<uint2> indices;
+#endif
+Buffer<uint2> positions;
+Buffer<half4> transforms;
+Buffer<half4> colors;
+Buffer<float4> spherical_harmonics;
+
+float3 eval_sh_color(uint splat_id, float3 dir)
+{
+  if (bUseSphericalHarmonics == 0 || spherical_harmonic_coeff_count == 0)
+  {
+    return float3(0.0, 0.0, 0.0);
+  }
+
+  uint sh_base = splat_id * 15u;
+  float x = dir.x;
+  float y = dir.y;
+  float z = dir.z;
+  float xx = x * x;
+  float yy = y * y;
+  float zz = z * z;
+  float3 result = float3(0.0, 0.0, 0.0);
+
+  result += (-0.4886025119 * y) * spherical_harmonics[sh_base + 0u].xyz;
+  result += (0.4886025119 * z) * spherical_harmonics[sh_base + 1u].xyz;
+  result += (-0.4886025119 * x) * spherical_harmonics[sh_base + 2u].xyz;
+
+  if (spherical_harmonic_coeff_count <= 3u)
+  {
+    return result;
+  }
+
+  result += (1.0925484306 * x * y) * spherical_harmonics[sh_base + 3u].xyz;
+  result += (-1.0925484306 * y * z) * spherical_harmonics[sh_base + 4u].xyz;
+  result += (0.3153915653 * (2.0 * zz - xx - yy)) * spherical_harmonics[sh_base + 5u].xyz;
+  result += (-1.0925484306 * x * z) * spherical_harmonics[sh_base + 6u].xyz;
+  result += (0.5462742153 * (xx - yy)) * spherical_harmonics[sh_base + 7u].xyz;
+
+  if (spherical_harmonic_coeff_count <= 8u)
+  {
+    return result;
+  }
+
+  result += (-0.5900435899 * y * (3.0 * xx - yy)) * spherical_harmonics[sh_base + 8u].xyz;
+  result += (2.8906114426 * x * y * z) * spherical_harmonics[sh_base + 9u].xyz;
+  result += (-0.4570457995 * y * (4.0 * zz - xx - yy)) * spherical_harmonics[sh_base + 10u].xyz;
+  result += (0.3731763326 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)) * spherical_harmonics[sh_base + 11u].xyz;
+  result += (-0.4570457995 * x * (4.0 * zz - xx - yy)) * spherical_harmonics[sh_base + 12u].xyz;
+  result += (1.4453057213 * z * (xx - yy)) * spherical_harmonics[sh_base + 13u].xyz;
+  result += (-0.5900435899 * x * (xx - 3.0 * yy)) * spherical_harmonics[sh_base + 14u].xyz;
+  return result;
+}
+
+half4 eval_splat_color(uint splat_id, float3 pos_local)
+{
+  float4 base_color = float4(colors[splat_id]);
+  if (bUseSphericalHarmonics == 0 || spherical_harmonic_coeff_count == 0)
+  {
+    return half4(base_color);
+  }
+
+  float3 dir = normalize(pos_local - view_origin_local_cm);
+  float3 color_gamma = pow(saturate(base_color.rgb), 1.0 / 2.2);
+  color_gamma = max(color_gamma + eval_sh_color(splat_id, dir), 0.0);
+  base_color.rgb = pow(color_gamma, 2.2);
+  return half4(base_color);
+}
+
+/**
+ * Generates a vertex bounding a splat.
+ *
+ * @param in_id - Vertex index, of 6 * the number of splats.
+ * @param in_view_id - Eye index (if relevant).
+ * @param out_position - Clip space position, where (x, y) bounds the splat at
+ * chosen value of σ.
+ * @param out_sig_div_sqrt_2 - the radius of the splat, in σ's, over sqrt(2).
+ * @param out_color - Base color of the splat.
+ */
+void main(in uint in_id : SV_VertexID,
+#if WITH_VIEW_ID
+          in uint in_view_id : SV_ViewID,
+#endif
+          out half2 out_sig_div_sqrt_2 : DELTA_STD_DEVS,
+          out nointerpolation half4 out_color : COLOR,
+          out float4 out_position : SV_Position) {
+  // If using CPU sorting, indices are packed as (index, distance). No #if
+  // needed if explicitly adding .x.
+  uint splat_id = indices[in_id / 6].x;
+
+  // Position pipeline kept in float: half cannot represent positions in cm
+  // for scenes with non-trivial extent or far-from-origin actor placement,
+  // and the world-translation add below would otherwise saturate fp16 and
+  // produce wildly stretched splats.
+  float3 pos_local = unpack_pos(positions[splat_id], pos_scale_cm, pos_min_cm).xyz;
+  float3 pos_world = mul(pos_local, (float3x3)local_to_world);
+
+  float4 pos_clip = world_to_clip(pos_world
+#if WITH_VIEW_ID
+                                 ,
+                                 in_view_id
+#endif
+  );
+
+  bool outside_frustum = pos_clip.x < -pos_clip.w || pos_clip.x > pos_clip.w ||
+                         pos_clip.y < -pos_clip.w || pos_clip.y > pos_clip.w ||
+                         pos_clip.z > pos_clip.w;
+
+  if (outside_frustum) {
+    out_position = float4(0.f, 0.f, 0.f, 0.f);
+    return;
+  }
+
+  /**
+	 * Fit triangle to splat.
+	 *
+	 * 1. Each transform t is of radius 1σ. Scale to the desired number of
+	 * standard deviations σ.
+	 * 2. transforms are sized in pixels, * 2. Dividing by the resolution of the
+	 * render target, and multiplying the dynamic resolution factor, converts
+	 * the space to NDC. the scalar 2 is from NDC being of height/width 2, but
+	 * is multiplied in in the vertex shader to save an op.
+	 * 3. (X, Y) offset is multiplied by W, to cancel out the subsequent
+	 * perspective divide (by W). Added to center (X, Y), this gives a
+	 * specific vertex of the triangle.
+	 * 4. Per vertex, out_sig_div_sqrt_2 is +- xσ/sqrt(2). this is interpolated by
+	 * the fragment shader, and used to determine the distance in σ from the
+	 * splat's center that a fragment is at.
+	 *
+	 * Note: Using RADIUS_SIGMA_OVER_SQRT_2 here rather than just +/-1, as it
+	 * removes a multiply from the below `out_sig_div_sqrt_2` assignment.
+	 */
+  half4 t = transforms[splat_id];
+  half2 corners[6] = {
+      half2(-RADIUS_SIGMA_OVER_SQRT_2, -RADIUS_SIGMA_OVER_SQRT_2),
+      half2(RADIUS_SIGMA_OVER_SQRT_2, -RADIUS_SIGMA_OVER_SQRT_2),
+      half2(-RADIUS_SIGMA_OVER_SQRT_2, RADIUS_SIGMA_OVER_SQRT_2),
+      half2(RADIUS_SIGMA_OVER_SQRT_2, -RADIUS_SIGMA_OVER_SQRT_2),
+      half2(-RADIUS_SIGMA_OVER_SQRT_2, RADIUS_SIGMA_OVER_SQRT_2),
+      half2(RADIUS_SIGMA_OVER_SQRT_2, RADIUS_SIGMA_OVER_SQRT_2)};
+  // Scale to xσ/sqrt(2).
+  half2 offset = mul(half2x2(t.x, t.y, t.z, t.w), corners[in_id % 6]);
+  offset *= half(splat_scale);
+  // (Pixel size * 2) to NDC.
+  offset /= get_render_resolution();
+
+  // Actual vertex position. Compose in float so adding the (already-float)
+  // pos_clip components doesn't get demoted.
+  out_position =
+      float4(pos_clip.xy + float2(offset) * pos_clip.w, pos_clip.z, pos_clip.w);
+  // Distance from center, in σ, for interpolating in fragment shader.
+  out_sig_div_sqrt_2 = corners[in_id % 6];
+  // Color.
+  out_color = eval_splat_color(splat_id, pos_local);
+}

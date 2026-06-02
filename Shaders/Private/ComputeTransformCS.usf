@@ -9,6 +9,8 @@
 
 float4x4 local_to_view;
 float two_focal_length;
+float min_screen_variance_px;
+float cov_scale_cm2;
 uint num_splats;
 float3 pos_scale_cm;
 float3 pos_min_cm;

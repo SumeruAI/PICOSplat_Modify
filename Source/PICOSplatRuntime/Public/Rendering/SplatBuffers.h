@@ -148,6 +148,10 @@ template <typename T> EPixelFormat GetFormat()
 		// PF_R64_UINT doesn't work.
 		return PF_R32G32_UINT;
 	}
+	else if (std::is_same_v<T, FPackedPos64>)
+	{
+		return PF_R32G32_UINT;
+	}
 	// 32 bits per splat.
 	else if (std::is_same_v<T, FColor>)
 	{

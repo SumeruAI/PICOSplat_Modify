@@ -7,4 +7,8 @@
 
 #include "../ThirdParty/Public/constants.ush"
 
+uint bSuperSplatCompatible;
+float SplatAlphaGain;
+float SplatExposureIndependence;
+
 #include "../ThirdParty/Public/render_splat.ps.ush"

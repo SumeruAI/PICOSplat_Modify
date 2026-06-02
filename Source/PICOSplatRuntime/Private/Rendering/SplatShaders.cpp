@@ -26,6 +26,11 @@ IMPLEMENT_GLOBAL_SHADER(
 	"/Plugin/PICOSplat/Private/ComputeTransformCS.usf",
 	"main",
 	SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(
+	FInitializeGlobalSortMetadataCS,
+	"/Plugin/PICOSplat/Private/InitializeGlobalSortMetadataCS.usf",
+	"main",
+	SF_Compute);
 IMPLEMENT_TEMPLATED_GLOBAL_SHADER(
 	FRenderSplatVS<ESortingDevice::CPU>,
 	"/Plugin/PICOSplat/Private/RenderSplatVS.usf",
@@ -37,8 +42,18 @@ IMPLEMENT_TEMPLATED_GLOBAL_SHADER(
 	"main",
 	SF_Vertex);
 IMPLEMENT_GLOBAL_SHADER(
+	FRenderGlobalSplatVS,
+	"/Plugin/PICOSplat/Private/RenderGlobalSplatVS.usf",
+	"main",
+	SF_Vertex);
+IMPLEMENT_GLOBAL_SHADER(
 	FRenderSplatPS,
 	"/Plugin/PICOSplat/Private/RenderSplatPS.usf",
+	"main",
+	SF_Pixel);
+IMPLEMENT_GLOBAL_SHADER(
+	FCompositeSplatPS,
+	"/Plugin/PICOSplat/Private/CompositeSplatPS.usf",
 	"main",
 	SF_Pixel);
 

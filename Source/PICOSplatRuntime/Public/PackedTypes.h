@@ -164,6 +164,47 @@ private:
 };
 
 /**
+ * Splat position, packed into 64-bits.
+ *
+ * The format is as follows:
+ *   X: 21-bit unsigned normalized integer starting at bit 0.
+ *   Y: 21-bit unsigned normalized integer starting at bit 21.
+ *   Z: 22-bit unsigned normalized integer starting at bit 42.
+ */
+struct FPackedPos64
+{
+	FPackedPos64() = default;
+
+	FPackedPos64(float X, float Y, float Z)
+	{
+		const uint64 XPacked = ToUNorm<21>(X);
+		const uint64 YPacked = ToUNorm<21>(Y);
+		const uint64 ZPacked = ToUNorm<22>(Z);
+
+		Packed = (ZPacked << 42) | (YPacked << 21) | XPacked;
+	}
+
+	FPackedPos64(const FVector3f& V) : FPackedPos64(V.X, V.Y, V.Z) {}
+
+	friend FArchive& operator<<(FArchive& Ar, FPackedPos64& P)
+	{
+		return Ar << P.Packed;
+	}
+
+	static constexpr uint32 MAX_UNORM_21 = 0x1FFFFF;
+	static constexpr uint32 MAX_UNORM_22 = 0x3FFFFF;
+	static constexpr FVector3f MAX = []() constexpr
+	{
+		FVector3f Max(MAX_UNORM_21, UE::Math::TVectorConstInit{});
+		Max.Z = MAX_UNORM_22;
+		return Max;
+	}();
+
+private:
+	uint64 Packed;
+};
+
+/**
  * Splat covariance, packed into 64-bits.
  *
  * The format is as follows:

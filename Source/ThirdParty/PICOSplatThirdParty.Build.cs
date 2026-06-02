@@ -9,9 +9,12 @@ public class PICOSplatThirdParty : ModuleRules
 {
 	public PICOSplatThirdParty(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateDefinitions.Add("SPLAT_EXPORT_API=__declspec(dllexport)");
-        PrivateDependencyModuleNames.Add("Core");
+		string SplatExportMacro = Target.Platform == UnrealTargetPlatform.Win64
+			? "__declspec(dllexport)"
+			: "";
+		PrivateDefinitions.Add($"SPLAT_EXPORT_API={SplatExportMacro}");
+		PrivateDependencyModuleNames.Add("Core");
 
-        PublicIncludePaths.Add(Path.Combine(ModuleDirectory, "splat"));
+		PublicIncludePaths.Add(Path.Combine(ModuleDirectory, "splat"));
 	}
 }

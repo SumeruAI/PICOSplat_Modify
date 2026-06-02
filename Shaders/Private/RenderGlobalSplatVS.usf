@@ -1,0 +1,240 @@
+/*
+  Copyright (c) 2025 PICO Technology Co., Ltd. See LICENSE.md.
+*/
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Public/Platform.ush"
+
+#include "../ThirdParty/Public/constants.ush"
+#include "../ThirdParty/Public/unpacking.ush"
+
+#define WITH_VIEW_ID USE_MULTI_VIEW_ID_SV
+
+float4x4 LocalToWorlds[GLOBAL_RENDER_MAX_PROXIES];
+float4 PosMinsCM[GLOBAL_RENDER_MAX_PROXIES];
+float4 PosScalesCM[GLOBAL_RENDER_MAX_PROXIES];
+float4 ViewOriginsLocalCM[GLOBAL_RENDER_MAX_PROXIES];
+float SplatScale;
+uint bUseSphericalHarmonics;
+uint SphericalHarmonicCoeffCount;
+Buffer<uint> SortedIndices;
+
+#define DECLARE_PROXY_RESOURCES(N) \
+	Buffer<uint2> Positions##N; \
+	Buffer<float4> Transforms##N; \
+	Buffer<float4> Colors##N;
+
+DECLARE_PROXY_RESOURCES(0)
+DECLARE_PROXY_RESOURCES(1)
+DECLARE_PROXY_RESOURCES(2)
+DECLARE_PROXY_RESOURCES(3)
+DECLARE_PROXY_RESOURCES(4)
+DECLARE_PROXY_RESOURCES(5)
+DECLARE_PROXY_RESOURCES(6)
+DECLARE_PROXY_RESOURCES(7)
+DECLARE_PROXY_RESOURCES(8)
+DECLARE_PROXY_RESOURCES(9)
+DECLARE_PROXY_RESOURCES(10)
+DECLARE_PROXY_RESOURCES(11)
+DECLARE_PROXY_RESOURCES(12)
+DECLARE_PROXY_RESOURCES(13)
+DECLARE_PROXY_RESOURCES(14)
+DECLARE_PROXY_RESOURCES(15)
+DECLARE_PROXY_RESOURCES(16)
+DECLARE_PROXY_RESOURCES(17)
+DECLARE_PROXY_RESOURCES(18)
+DECLARE_PROXY_RESOURCES(19)
+DECLARE_PROXY_RESOURCES(20)
+
+#undef DECLARE_PROXY_RESOURCES
+
+void load_proxy_resources(
+	uint proxy_slot,
+	uint splat_id,
+	out uint2 packed_position,
+	out float4 transform,
+	out float4 color)
+{
+	packed_position = 0;
+	transform = 0;
+	color = 0;
+
+#define LOAD_PROXY(N) \
+	packed_position = Positions##N[splat_id]; \
+	transform = Transforms##N[splat_id]; \
+	color = Colors##N[splat_id];
+
+	switch (proxy_slot)
+	{
+	case 0: LOAD_PROXY(0); break;
+	case 1: LOAD_PROXY(1); break;
+	case 2: LOAD_PROXY(2); break;
+	case 3: LOAD_PROXY(3); break;
+	case 4: LOAD_PROXY(4); break;
+	case 5: LOAD_PROXY(5); break;
+	case 6: LOAD_PROXY(6); break;
+	case 7: LOAD_PROXY(7); break;
+	case 8: LOAD_PROXY(8); break;
+	case 9: LOAD_PROXY(9); break;
+	case 10: LOAD_PROXY(10); break;
+	case 11: LOAD_PROXY(11); break;
+	case 12: LOAD_PROXY(12); break;
+	case 13: LOAD_PROXY(13); break;
+	case 14: LOAD_PROXY(14); break;
+	case 15: LOAD_PROXY(15); break;
+	case 16: LOAD_PROXY(16); break;
+	case 17: LOAD_PROXY(17); break;
+	case 18: LOAD_PROXY(18); break;
+	case 19: LOAD_PROXY(19); break;
+	case 20: LOAD_PROXY(20); break;
+	default: break;
+	}
+
+#undef LOAD_PROXY
+}
+
+float3 eval_sh_color(float4 sh[15], float3 dir)
+{
+	if (bUseSphericalHarmonics == 0 || SphericalHarmonicCoeffCount == 0)
+	{
+		return float3(0.0, 0.0, 0.0);
+	}
+
+	float x = dir.x;
+	float y = dir.y;
+	float z = dir.z;
+	float xx = x * x;
+	float yy = y * y;
+	float zz = z * z;
+	float3 result = float3(0.0, 0.0, 0.0);
+
+	result += (-0.4886025119 * y) * sh[0].xyz;
+	result += (0.4886025119 * z) * sh[1].xyz;
+	result += (-0.4886025119 * x) * sh[2].xyz;
+
+	if (SphericalHarmonicCoeffCount <= 3u)
+	{
+		return result;
+	}
+
+	result += (1.0925484306 * x * y) * sh[3].xyz;
+	result += (-1.0925484306 * y * z) * sh[4].xyz;
+	result += (0.3153915653 * (2.0 * zz - xx - yy)) * sh[5].xyz;
+	result += (-1.0925484306 * x * z) * sh[6].xyz;
+	result += (0.5462742153 * (xx - yy)) * sh[7].xyz;
+
+	if (SphericalHarmonicCoeffCount <= 8u)
+	{
+		return result;
+	}
+
+	result += (-0.5900435899 * y * (3.0 * xx - yy)) * sh[8].xyz;
+	result += (2.8906114426 * x * y * z) * sh[9].xyz;
+	result += (-0.4570457995 * y * (4.0 * zz - xx - yy)) * sh[10].xyz;
+	result += (0.3731763326 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)) * sh[11].xyz;
+	result += (-0.4570457995 * x * (4.0 * zz - xx - yy)) * sh[12].xyz;
+	result += (1.4453057213 * z * (xx - yy)) * sh[13].xyz;
+	result += (-0.5900435899 * x * (xx - 3.0 * yy)) * sh[14].xyz;
+	return result;
+}
+
+half4 eval_splat_color(float4 base_color)
+{
+	return half4(base_color);
+}
+
+float4 world_to_clip(
+	float3 world,
+	uint proxy_slot
+#if WITH_VIEW_ID
+	,
+	uint in_view_id
+#endif
+)
+{
+#if USE_MULTI_VIEW_ID_SV
+	ResolvedView = ResolveView(in_view_id);
+#else
+	ResolvedView = ResolveView();
+#endif
+	world += LocalToWorlds[proxy_slot][3].xyz +
+		ResolvedView.PreViewTranslationHigh;
+	return mul(float4(world, 1), ResolvedView.TranslatedWorldToClip);
+}
+
+half2 get_render_resolution()
+{
+	return View.ViewSizeAndInvSize.xy / View.ViewResolutionFraction;
+}
+
+void main(in uint in_id : SV_VertexID,
+#if WITH_VIEW_ID
+	 in uint in_view_id : SV_ViewID,
+#endif
+	 out half2 out_sig_div_sqrt_2 : DELTA_STD_DEVS,
+	 out nointerpolation half4 out_color : COLOR,
+	 out float4 out_position : SV_Position)
+{
+	uint packed_index = SortedIndices[in_id / 6];
+	uint proxy_slot = packed_index >> GLOBAL_SORT_PROXY_SLOT_SHIFT;
+	uint splat_id = packed_index & GLOBAL_SORT_LOCAL_INDEX_MASK;
+
+	if (proxy_slot >= GLOBAL_RENDER_MAX_PROXIES)
+	{
+		out_position = half4(0.f, 0.f, 0.f, 0.f);
+		out_color = half4(0.f, 0.f, 0.f, 0.f);
+		out_sig_div_sqrt_2 = half2(0.f, 0.f);
+		return;
+	}
+
+	uint2 packed_position;
+	float4 transform;
+	float4 color;
+	load_proxy_resources(proxy_slot, splat_id, packed_position, transform, color);
+
+	// Position pipeline kept in float to avoid fp16 precision loss / overflow
+	// for large or far-from-origin scenes; matches render_splat.vs.ush.
+	float3 pos_local = unpack_pos(
+		packed_position,
+		PosScalesCM[proxy_slot].xyz,
+		PosMinsCM[proxy_slot].xyz).xyz;
+	float3 pos_world = mul(pos_local, (float3x3)LocalToWorlds[proxy_slot]);
+	float4 pos_clip = world_to_clip(
+		pos_world,
+		proxy_slot
+#if WITH_VIEW_ID
+		,
+		in_view_id
+#endif
+	);
+
+	bool outside_frustum =
+		pos_clip.x < -pos_clip.w || pos_clip.x > pos_clip.w ||
+		pos_clip.y < -pos_clip.w || pos_clip.y > pos_clip.w ||
+		pos_clip.z > pos_clip.w;
+
+	if (outside_frustum)
+	{
+		out_position = float4(0.f, 0.f, 0.f, 0.f);
+		out_color = half4(0.f, 0.f, 0.f, 0.f);
+		out_sig_div_sqrt_2 = half2(0.f, 0.f);
+		return;
+	}
+
+	half4 t = half4(transform);
+	half2 corners[6] = {
+		half2(-RADIUS_SIGMA_OVER_SQRT_2, -RADIUS_SIGMA_OVER_SQRT_2),
+		half2(RADIUS_SIGMA_OVER_SQRT_2, -RADIUS_SIGMA_OVER_SQRT_2),
+		half2(-RADIUS_SIGMA_OVER_SQRT_2, RADIUS_SIGMA_OVER_SQRT_2),
+		half2(RADIUS_SIGMA_OVER_SQRT_2, -RADIUS_SIGMA_OVER_SQRT_2),
+		half2(-RADIUS_SIGMA_OVER_SQRT_2, RADIUS_SIGMA_OVER_SQRT_2),
+		half2(RADIUS_SIGMA_OVER_SQRT_2, RADIUS_SIGMA_OVER_SQRT_2)};
+	half2 offset = mul(half2x2(t.x, t.y, t.z, t.w), corners[in_id % 6]);
+	offset *= half(SplatScale);
+	offset /= get_render_resolution();
+
+	out_position =
+		float4(pos_clip.xy + float2(offset) * pos_clip.w, pos_clip.z, pos_clip.w);
+	out_sig_div_sqrt_2 = corners[in_id % 6];
+	out_color = eval_splat_color(color);
+}

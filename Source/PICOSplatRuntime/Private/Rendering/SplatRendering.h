@@ -13,6 +13,15 @@
 namespace PICO::Splat
 {
 
+bool IsSuperSplatCompatibilityEnabled_RenderThread();
+float GetSuperSplatMinScreenVariance_RenderThread();
+uint32 GetSuperSplatCompatibilityShaderFlag_RenderThread();
+bool IsCompositePipelineEnabled_RenderThread();
+float GetSplatAlphaGain_RenderThread();
+float GetSplatExposureIndependence_RenderThread();
+uint32 GetSphericalHarmonicsShaderFlag_RenderThread();
+uint32 GetSphericalHarmonicsCoeffCount_RenderThread();
+
 // TODO(seth): CPU/GPU render handling should be merged.
 
 BEGIN_SHADER_PARAMETER_STRUCT(FRenderSplatCPUSortDeps, )
@@ -33,6 +42,16 @@ SHADER_PARAMETER_STRUCT_INCLUDE(
 	VS)
 SHADER_PARAMETER_STRUCT_INCLUDE(
 	PICO::Splat::Shaders::FRenderSplatPS::FParameters, PS)
+END_SHADER_PARAMETER_STRUCT()
+
+BEGIN_SHADER_PARAMETER_STRUCT(FRenderGlobalSplatDeps, )
+SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, SortedIndices)
+SHADER_PARAMETER_STRUCT_INCLUDE(
+	PICO::Splat::Shaders::FRenderGlobalSplatVS::FParameters,
+	VS)
+SHADER_PARAMETER_STRUCT_INCLUDE(
+	PICO::Splat::Shaders::FRenderSplatPS::FParameters,
+	PS)
 END_SHADER_PARAMETER_STRUCT()
 
 /**
@@ -64,6 +83,28 @@ FRDGPassRef ComputeTransforms(
 	FRDGBuilder& GraphBuilder, const FSceneView& View, FSplatSceneProxy* Proxy);
 
 /**
+ * Populates frame-global metadata buffers for one proxy slice in the
+ * experimental cross-actor sorting path.
+ */
+FRDGPassRef InitializeGlobalSortMetadata(
+	FRDGBuilder& GraphBuilder,
+	const FSceneView& View,
+	FSplatSceneProxy* Proxy,
+	uint32 ProxySlot,
+	uint32 GlobalOffset,
+	FRDGBufferRef MetadataPackedIndices,
+	FRDGBufferRef MetadataDistances);
+
+/**
+ * Sorts the experimental frame-global metadata buffers by distance.
+ */
+FRDGPassRef SortGlobalMetadata(
+	FRDGBuilder& GraphBuilder,
+	uint32 NumSplats,
+	FRDGBufferRef MetadataPackedIndices,
+	FRDGBufferRef MetadataDistances);
+
+/**
  * Draws a splat, sorted by CPU.
  *
  * @param RHICmdList - Command list to write to.
@@ -90,6 +131,25 @@ void RenderSplatGPUSort(
 	FRenderSplatGPUSortDeps* SplatParameters,
 	uint32 NumSplats,
 	const FSceneView& View);
+
+/**
+ * Draws all visible splats through the experimental global draw path.
+ */
+void RenderGlobalSplats(
+	FRHICommandList& RHICmdList,
+	FRenderGlobalSplatDeps* SplatParameters,
+	uint32 NumSplats,
+	const FSceneView& View);
+
+/**
+ * Adds a fullscreen pass that composites the dedicated splat target into
+ * SceneColor using premultiplied alpha blending.
+ */
+void CompositeSplatTexture(
+	FRDGBuilder& GraphBuilder,
+	const FSceneView& View,
+	FRDGTextureRef SplatTexture,
+	FRDGTextureRef SceneColorTexture);
 
 /**
  * Adds GPU sorting pass.

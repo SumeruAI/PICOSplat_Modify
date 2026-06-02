@@ -11,6 +11,10 @@
 #define WITH_VIEW_ID USE_MULTI_VIEW_ID_SV
 
 float4x4 local_to_world;
+float3 view_origin_local_cm;
+float splat_scale;
+uint bUseSphericalHarmonics;
+uint spherical_harmonic_coeff_count;
 float3 pos_scale_cm;
 float3 pos_min_cm;
 
@@ -39,8 +43,8 @@ float3 pos_min_cm;
  * @param world - World-space position.
  * @return Clip-space position.
  */
-half4 world_to_clip(
-	half3 world
+float4 world_to_clip(
+	float3 world
 #if WITH_VIEW_ID
 	,
 	uint in_view_id
@@ -54,7 +58,7 @@ half4 world_to_clip(
 	ResolvedView = ResolveView();
 #endif
 	world += local_to_world[3].xyz + ResolvedView.PreViewTranslationHigh;
-	return mul(half4(world, 1), ResolvedView.TranslatedWorldToClip);
+	return mul(float4(world, 1), ResolvedView.TranslatedWorldToClip);
 }
 
 /**

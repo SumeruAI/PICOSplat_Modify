@@ -4,10 +4,17 @@
 
 #pragma once
 
+class FRDGBuffer;
+
+#include "Containers/Array.h"
+#include "Containers/Map.h"
 #include "Containers/Set.h"
+#include "HAL/CriticalSection.h"
 #include "Misc/AssertionMacros.h"
+#include "Misc/ScopeLock.h"
 #include "SceneViewExtension.h"
 #include "SplatSceneProxy.h"
+#include "Templates/SharedPointer.h"
 
 namespace PICO::Splat
 {
@@ -24,6 +31,46 @@ namespace PICO::Splat
 class FSplatSceneViewExtension final : public FSceneViewExtensionBase
 {
 public:
+	struct FVisibleProxyFrameEntry
+	{
+		FSplatSceneProxy* Proxy = nullptr;
+		uint32 ProxySlot = 0;
+		uint32 SplatOffset = 0;
+		uint32 NumSplats = 0;
+		FMatrix44f LocalToWorld = FMatrix44f::Identity;
+		FVector3f PosMinCM = FVector3f::ZeroVector;
+		FVector3f PosScaleCM = FVector3f::ZeroVector;
+		FShaderResourceViewRHIRef PositionsSRV;
+		FShaderResourceViewRHIRef ColorsSRV;
+		FShaderResourceViewRHIRef SphericalHarmonicsSRV;
+		FShaderResourceViewRHIRef CovariancesSRV;
+		FShaderResourceViewRHIRef TransformsSRV;
+	};
+
+	struct FGlobalSortFrameData
+	{
+		// Owning view family pointer, used to scope cleanup so other
+		// concurrent families do not wipe each other's prepared data.
+		const FSceneViewFamily* OwningFamily = nullptr;
+		TArray<FVisibleProxyFrameEntry> VisibleProxies;
+		uint32 TotalVisibleSplats = 0;
+		bool bGlobalSortRequested = false;
+		bool bGlobalSortSupported = false;
+		FRDGBuffer* GlobalMetadataPackedIndices = nullptr;
+		FRDGBuffer* GlobalMetadataDistances = nullptr;
+
+		void Reset()
+		{
+			OwningFamily = nullptr;
+			VisibleProxies.Reset();
+			TotalVisibleSplats = 0;
+			bGlobalSortRequested = false;
+			bGlobalSortSupported = false;
+			GlobalMetadataPackedIndices = nullptr;
+			GlobalMetadataDistances = nullptr;
+		}
+	};
+
 	FSplatSceneViewExtension(const FAutoRegister& AutoRegister);
 
 	//~ Begin ISceneViewExtension Interface
@@ -31,7 +78,9 @@ public:
 	virtual void
 	SetupView(FSceneViewFamily& InViewFamily, FSceneView& InView) override {};
 	virtual void
-	BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override {};
+	BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override;
+	virtual void PostRenderViewFamily_RenderThread(
+		FRDGBuilder& GraphBuilder, FSceneViewFamily& InViewFamily) override;
 
 	/**
 	 * First stage: Enqueue async compute work, to be done before actual
@@ -55,6 +104,10 @@ public:
 		FRDGBuilder& GraphBuilder,
 		const FSceneView& View,
 		const FPostProcessingInputs& Inputs) override;
+	virtual void SubscribeToPostProcessingPass(
+		EPostProcessingPass Pass,
+		FAfterPassCallbackDelegateArray& InOutPassCallbacks,
+		bool bIsPassEnabled) override;
 
 	/**
 	 * Second stage, on mobile renderer.
@@ -72,6 +125,11 @@ public:
 	void RegisterSplat_RenderThread(FSplatSceneProxy* Proxy)
 	{
 		check(IsInRenderingThread());
+		if (!Proxy)
+		{
+			return;
+		}
+		FScopeLock Lock(&FrameDataCS);
 		Proxies.Add(Proxy);
 	}
 
@@ -83,11 +141,61 @@ public:
 	void UnregisterSplat_RenderThread(FSplatSceneProxy* Proxy)
 	{
 		check(IsInRenderingThread());
+		FScopeLock Lock(&FrameDataCS);
 		Proxies.Remove(Proxy);
+		// Invalidate any cached frame entries that still reference this
+		// proxy, so the render passes built earlier this frame skip it
+		// instead of dereferencing a soon-to-be-destroyed pointer.
+		for (TPair<const FSceneView*, TSharedPtr<FGlobalSortFrameData>>& Pair :
+			 FrameDataByView)
+		{
+			if (!Pair.Value.IsValid())
+			{
+				continue;
+			}
+			for (FVisibleProxyFrameEntry& Entry : Pair.Value->VisibleProxies)
+			{
+				if (Entry.Proxy == Proxy)
+				{
+					Entry.Proxy = nullptr;
+					Entry.PositionsSRV.SafeRelease();
+					Entry.ColorsSRV.SafeRelease();
+					Entry.SphericalHarmonicsSRV.SafeRelease();
+					Entry.CovariancesSRV.SafeRelease();
+					Entry.TransformsSRV.SafeRelease();
+				}
+			}
+		}
 	}
 
 private:
+	TSharedRef<FGlobalSortFrameData> BuildFrameData_RenderThread(
+		const FSceneView& View, bool bSkipNeedsSort);
+	TSharedPtr<FGlobalSortFrameData> FindFrameData_RenderThread(
+		const FSceneView& View);
+	FScreenPassTexture PostTemporalPass_RenderThread(
+		FRDGBuilder& GraphBuilder,
+		const FSceneView& View,
+		const FPostProcessMaterialInputs& Inputs);
+	void RenderSplats_RenderThread(
+		FRDGBuilder& GraphBuilder,
+		const FSceneView& View,
+		FRDGTextureRef SceneColorTexture,
+		FRDGTextureRef SceneDepthTexture);
+	void LogGlobalSortFallbackOnce_RenderThread();
+
 	bool bIsSortingOnGPU;
+	bool bHasLoggedGlobalSortFallback;
+	// All access to `Proxies` and `FrameDataByView` must be guarded by this
+	// critical section. The renderer can dispatch view-extension callbacks
+	// for different views (e.g. multiple viewports, scene captures, PIE)
+	// concurrently on the render thread / parallel translate tasks, and
+	// concurrent mutation otherwise corrupts the TMap/TSet.
+	mutable FCriticalSection FrameDataCS;
+	// Heap-allocated values keep stable pointers when the map rehashes, so
+	// references handed out to passes remain valid even if other views add
+	// or remove entries while RDG passes are still being constructed.
+	TMap<const FSceneView*, TSharedPtr<FGlobalSortFrameData>> FrameDataByView;
 	TSet<FSplatSceneProxy*> Proxies;
 };
 

@@ -67,8 +67,21 @@ public:
 	 */
 	uint32 GetNumSplats() const
 	{
-		check(Asset);
-		return Asset->GetNumSplats();
+		return NumSplatsCached;
+	}
+
+	/**
+	 * @return Number of splats that should be drawn for the current sorted buffer.
+	 */
+	uint32 GetNumDrawableSplats() const
+	{
+		if (bIsSortingOnGPU)
+		{
+			return GetNumSplats();
+		}
+
+		check(CPUSorting);
+		return CPUSorting->GetNumDrawableSplats();
 	}
 
 	/**
@@ -92,8 +105,12 @@ public:
 	 */
 	FShaderResourceViewRHIRef GetColorsSRV() const
 	{
-		check(Asset);
-		return Asset->GetColorsSRV();
+		return ColorsSRVCached;
+	}
+
+	FShaderResourceViewRHIRef GetSphericalHarmonicsSRV() const
+	{
+		return SphericalHarmonicsSRVCached;
 	}
 
 	/**
@@ -101,8 +118,12 @@ public:
 	 */
 	FShaderResourceViewRHIRef GetCovariancesSRV() const
 	{
-		check(Asset);
-		return Asset->GetCovariancesSRV();
+		return CovariancesSRVCached;
+	}
+
+	float GetCovarianceScaleCM2() const
+	{
+		return CovarianceScaleCM2Cached;
 	}
 
 	/**
@@ -137,8 +158,9 @@ public:
 	FShaderResourceViewRHIRef
 	GetPositionsSRV(FVector3f& OutPosMinCM, FVector3f& OutPosScaleCM) const
 	{
-		check(Asset);
-		return Asset->GetPositionsSRV(OutPosMinCM, OutPosScaleCM);
+		OutPosMinCM = PosMinCMCached;
+		OutPosScaleCM = PosScaleCMCached;
+		return PositionsSRVCached;
 	}
 
 	/**
@@ -200,7 +222,15 @@ public:
 	}
 
 private:
-	TObjectPtr<USplatAsset> Asset;
+	TWeakObjectPtr<USplatAsset> Asset;
+	uint32 NumSplatsCached = 0;
+	FShaderResourceViewRHIRef PositionsSRVCached;
+	FShaderResourceViewRHIRef ColorsSRVCached;
+	FShaderResourceViewRHIRef SphericalHarmonicsSRVCached;
+	FShaderResourceViewRHIRef CovariancesSRVCached;
+	FVector3f PosMinCMCached = FVector3f::ZeroVector;
+	FVector3f PosScaleCMCached = FVector3f::ZeroVector;
+	float CovarianceScaleCM2Cached = 1.0f;
 	FSplatGPUToGPUBuffer Transforms;
 
 	bool bIsSortingOnGPU;
@@ -221,11 +251,27 @@ private:
 	FString Name;
 
 #if WITH_EDITOR
+	struct FEditorCollisionHullRenderData
+	{
+		explicit FEditorCollisionHullRenderData(
+			ERHIFeatureLevel::Type FeatureLevel)
+			: VertexFactory(FeatureLevel, "FSplatSceneProxyHull")
+		{
+		}
+
+		uint32 NumPrimitives = 0;
+		FStaticMeshVertexBuffers VertexBuffers;
+		FDynamicMeshIndexBuffer32 IndexBuffer;
+		FLocalVertexFactory VertexFactory;
+	};
+
 	uint32 NumConvexHullTris;
 	FStaticMeshVertexBuffers VertexBuffers;
 	FDynamicMeshIndexBuffer32 IndexBuffer;
 	FLocalVertexFactory VertexFactory;
+	TArray<TUniquePtr<FEditorCollisionHullRenderData>> CollisionHullRenderData;
 	UBodySetup* BodySetup;
+	bool bForceSingleConvexHull = false;
 #endif
 };
 

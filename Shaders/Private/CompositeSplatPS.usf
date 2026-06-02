@@ -1,0 +1,14 @@
+/*
+  Copyright (c) 2025 PICO Technology Co., Ltd. See LICENSE.md.
+*/
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Public/Platform.ush"
+
+Texture2D SplatTexture;
+
+void main(in float4 SvPosition : SV_Position,
+          out float4 OutColor : SV_Target0)
+{
+	OutColor = SplatTexture.Load(int3(SvPosition.xy, 0));
+}

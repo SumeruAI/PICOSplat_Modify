@@ -18,48 +18,135 @@
 
 namespace PICO::Splat
 {
+#if WITH_EDITOR
+namespace
+{
+FLinearColor MakeHullDebugColor(int32 HullIndex)
+{
+	const uint8 Hue = static_cast<uint8>((HullIndex * 53) % 255);
+	return FLinearColor::MakeFromHSV8(Hue, 160, 255);
+}
+} // namespace
+#endif
 
 FSplatSceneProxy::FSplatSceneProxy(USplatComponent& Component)
 	: FPrimitiveSceneProxy(&Component)
 	, Asset(Component.GetAsset())
-	, Transforms(Asset->GetNumSplats(), EPixelFormat::PF_FloatRGBA)
+	, NumSplatsCached(Component.GetAsset()->GetNumSplats())
+	, Transforms(Component.GetAsset()->GetNumSplats(), EPixelFormat::PF_FloatRGBA)
 	, bIsSortingOnGPU(USplatSettings::IsSortingOnGPU())
 #if WITH_EDITOR
+	, bForceSingleConvexHull(Component.GetForceSingleConvexHull())
 	, VertexFactory(GetScene().GetFeatureLevel(), "FSplatSceneProxy")
 	, BodySetup(Component.GetBodySetup())
 #endif
 {
+	USplatAsset* AssetPtr = Component.GetAsset();
+	check(AssetPtr);
+
+	// Cache RHI references and packed-position constants up front so the
+	// render thread no longer needs to dereference the UObject. RHI refs are
+	// independently refcounted, so they remain valid even if the UAsset is
+	// later GC'd while this proxy is still in flight on the render thread.
+	PositionsSRVCached =
+		AssetPtr->GetPositionsSRV(PosMinCMCached, PosScaleCMCached);
+	ColorsSRVCached = AssetPtr->GetColorsSRV();
+	SphericalHarmonicsSRVCached = AssetPtr->GetSphericalHarmonicsSRV();
+	CovariancesSRVCached = AssetPtr->GetCovariancesSRV();
+	CovarianceScaleCM2Cached = AssetPtr->GetCovarianceScaleCM2();
+
 	if (bIsSortingOnGPU)
 	{
 		Indices = FSplatGPUToGPUBuffer(
-			Asset->GetNumSplats(), EPixelFormat::PF_R32_UINT);
+			NumSplatsCached, EPixelFormat::PF_R32_UINT);
 	}
 	else
 	{
 		CPUSorting = std::make_shared<FMultithreadedSortingBuffers>(
-			Asset->GetNumSplats());
+			NumSplatsCached);
 	}
 
 #if WITH_EDITOR
-	TConstArrayView<uint32> ConvexHullIndices = Asset->GetConvexHullIndices();
-	TConstArrayView<FVector3f> ConvexHullVertices =
-		Asset->GetConvexHullVertices();
-	NumConvexHullTris = ConvexHullIndices.Num() / 3;
-
-	TArray<FDynamicMeshVertex> OutVerts;
-	for (int32 Index = 0; Index < ConvexHullVertices.Num(); ++Index)
+	// Build main wireframe mesh from the BodySetup's actual convex geometry.
+	// In single-hull mode this is a single convex wrap; in multi-hull mode
+	// it's the combined mesh of all individual hulls.
 	{
-		OutVerts.Push(ConvexHullVertices[Index]);
-	}
-	// Enqueues RHI init for each buffer.
-	VertexBuffers.InitFromDynamicVertex(&VertexFactory, OutVerts);
+		TArray<FDynamicMeshVertex> OutVerts;
+		TArray<uint32> OutIndices;
 
-	IndexBuffer.Indices.SetNumUninitialized(ConvexHullIndices.Num());
-	for (int32 Index = 0; Index < ConvexHullIndices.Num(); ++Index)
-	{
-		IndexBuffer.Indices[Index] = ConvexHullIndices[Index];
+		if (bForceSingleConvexHull && BodySetup)
+		{
+			// Use the convex elem data from BodySetup (single merged hull).
+			for (const FKConvexElem& Elem : BodySetup->AggGeom.ConvexElems)
+			{
+				const uint32 VertexOffset = static_cast<uint32>(OutVerts.Num());
+				for (const FVector& Vertex : Elem.VertexData)
+				{
+					OutVerts.Push(FVector3f(Vertex));
+				}
+				for (int32 Idx : Elem.IndexData)
+				{
+					OutIndices.Add(VertexOffset + static_cast<uint32>(Idx));
+				}
+			}
+		}
+		else
+		{
+			// Use the asset's combined collision mesh (all hulls appended).
+			TConstArrayView<FVector3f> ConvexHullVertices =
+				AssetPtr->GetConvexHullVertices();
+			TConstArrayView<uint32> ConvexHullIndices =
+				AssetPtr->GetConvexHullIndices();
+			for (int32 Index = 0; Index < ConvexHullVertices.Num(); ++Index)
+			{
+				OutVerts.Push(ConvexHullVertices[Index]);
+			}
+			OutIndices.Append(ConvexHullIndices.GetData(), ConvexHullIndices.Num());
+		}
+
+		NumConvexHullTris = OutIndices.Num() / 3;
+		VertexBuffers.InitFromDynamicVertex(&VertexFactory, OutVerts);
+		IndexBuffer.Indices.SetNumUninitialized(OutIndices.Num());
+		for (int32 Index = 0; Index < OutIndices.Num(); ++Index)
+		{
+			IndexBuffer.Indices[Index] = OutIndices[Index];
+		}
+		BeginInitResource(&IndexBuffer);
 	}
-	BeginInitResource(&IndexBuffer);
+
+	for (const FSplatCollisionHull& Hull : AssetPtr->GetCollisionHulls())
+	{
+		if (bForceSingleConvexHull)
+		{
+			break; // skip per-hull colored render data
+		}
+
+		if (Hull.Vertices.Num() < 4 || Hull.Indices.Num() < 3)
+		{
+			continue;
+		}
+
+		TUniquePtr<FEditorCollisionHullRenderData> HullRenderData =
+			MakeUnique<FEditorCollisionHullRenderData>(GetScene().GetFeatureLevel());
+		HullRenderData->NumPrimitives = Hull.Indices.Num() / 3;
+
+		TArray<FDynamicMeshVertex> HullVerts;
+		for (const FVector3f& Vertex : Hull.Vertices)
+		{
+			HullVerts.Push(Vertex);
+		}
+		HullRenderData->VertexBuffers.InitFromDynamicVertex(
+			&HullRenderData->VertexFactory,
+			HullVerts);
+
+		HullRenderData->IndexBuffer.Indices.SetNumUninitialized(Hull.Indices.Num());
+		for (int32 Index = 0; Index < Hull.Indices.Num(); ++Index)
+		{
+			HullRenderData->IndexBuffer.Indices[Index] = Hull.Indices[Index];
+		}
+		BeginInitResource(&HullRenderData->IndexBuffer);
+		CollisionHullRenderData.Add(MoveTemp(HullRenderData));
+	}
 
 	Name = Component.GetOwner()->GetActorLabel();
 #else
@@ -134,6 +221,17 @@ void FSplatSceneProxy::DestroyRenderThreadResources()
 	VertexBuffers.ColorVertexBuffer.ReleaseResource();
 
 	IndexBuffer.ReleaseResource();
+
+	for (TUniquePtr<FEditorCollisionHullRenderData>& HullRenderData :
+	     CollisionHullRenderData)
+	{
+		HullRenderData->VertexFactory.ReleaseResource();
+		HullRenderData->VertexBuffers.PositionVertexBuffer.ReleaseResource();
+		HullRenderData->VertexBuffers.StaticMeshVertexBuffer.ReleaseResource();
+		HullRenderData->VertexBuffers.ColorVertexBuffer.ReleaseResource();
+		HullRenderData->IndexBuffer.ReleaseResource();
+	}
+	CollisionHullRenderData.Reset();
 #endif
 }
 
@@ -212,38 +310,78 @@ void FSplatSceneProxy::GetDynamicMeshElements(
 			 */
 			else if (bIsWireframeView)
 			{
-				FLinearColor ViewWireframeColor =
-					ViewFamily.EngineShowFlags.ActorColoration
-						? GetPrimitiveColor()
-						: GetWireframeColor();
+				const bool bShowColoredHulls =
+					USplatSettings::ShowColoredCollisionHullsInEditor() &&
+					!CollisionHullRenderData.IsEmpty();
 
-				// Note: This will be registered for deletion within
-				// RegisterOneFrameMaterialProxy().
-				FColoredMaterialRenderProxy* WireframeMaterialInstance =
-					new FColoredMaterialRenderProxy(
-						GEngine->WireframeMaterial->GetRenderProxy(),
-						GetSelectionColor(
-							ViewWireframeColor,
-							IsSelected(),
-							IsHovered(),
-							false));
-				Collector.RegisterOneFrameMaterialProxy(
-					WireframeMaterialInstance);
+				if (bShowColoredHulls)
+				{
+					for (int32 HullIndex = 0; HullIndex < CollisionHullRenderData.Num();
+					     ++HullIndex)
+					{
+						const FEditorCollisionHullRenderData& HullRenderData =
+							*CollisionHullRenderData[HullIndex];
 
-				FMeshBatch& Mesh = Collector.AllocateMesh();
-				Mesh.bDisableBackfaceCulling = true; // In case we're inside.
-				Mesh.LODIndex = 0;
-				Mesh.MaterialRenderProxy = WireframeMaterialInstance;
-				Mesh.bUseWireframeSelectionColoring = IsSelected();
-				Mesh.VertexFactory = &VertexFactory;
-				Mesh.bWireframe = true;
+						FColoredMaterialRenderProxy* WireframeMaterialInstance =
+							new FColoredMaterialRenderProxy(
+								GEngine->WireframeMaterial->GetRenderProxy(),
+								GetSelectionColor(
+									MakeHullDebugColor(HullIndex),
+									IsSelected(),
+									IsHovered(),
+									false));
+						Collector.RegisterOneFrameMaterialProxy(
+							WireframeMaterialInstance);
 
-				FMeshBatchElement& BatchElement = Mesh.Elements[0];
-				BatchElement.FirstIndex = 0;
-				BatchElement.IndexBuffer = &IndexBuffer;
-				BatchElement.NumPrimitives = NumConvexHullTris;
+						FMeshBatch& Mesh = Collector.AllocateMesh();
+						Mesh.bDisableBackfaceCulling = true;
+						Mesh.LODIndex = 0;
+						Mesh.MaterialRenderProxy = WireframeMaterialInstance;
+						Mesh.bUseWireframeSelectionColoring = IsSelected();
+						Mesh.VertexFactory = &HullRenderData.VertexFactory;
+						Mesh.bWireframe = true;
 
-				Collector.AddMesh(ViewIndex, Mesh);
+						FMeshBatchElement& BatchElement = Mesh.Elements[0];
+						BatchElement.FirstIndex = 0;
+						BatchElement.IndexBuffer = &HullRenderData.IndexBuffer;
+						BatchElement.NumPrimitives = HullRenderData.NumPrimitives;
+
+						Collector.AddMesh(ViewIndex, Mesh);
+					}
+				}
+				else
+				{
+					FLinearColor ViewWireframeColor =
+						ViewFamily.EngineShowFlags.ActorColoration
+							? GetPrimitiveColor()
+							: GetWireframeColor();
+
+					FColoredMaterialRenderProxy* WireframeMaterialInstance =
+						new FColoredMaterialRenderProxy(
+							GEngine->WireframeMaterial->GetRenderProxy(),
+							GetSelectionColor(
+								ViewWireframeColor,
+								IsSelected(),
+								IsHovered(),
+								false));
+					Collector.RegisterOneFrameMaterialProxy(
+						WireframeMaterialInstance);
+
+					FMeshBatch& Mesh = Collector.AllocateMesh();
+					Mesh.bDisableBackfaceCulling = true; // In case we're inside.
+					Mesh.LODIndex = 0;
+					Mesh.MaterialRenderProxy = WireframeMaterialInstance;
+					Mesh.bUseWireframeSelectionColoring = IsSelected();
+					Mesh.VertexFactory = &VertexFactory;
+					Mesh.bWireframe = true;
+
+					FMeshBatchElement& BatchElement = Mesh.Elements[0];
+					BatchElement.FirstIndex = 0;
+					BatchElement.IndexBuffer = &IndexBuffer;
+					BatchElement.NumPrimitives = NumConvexHullTris;
+
+					Collector.AddMesh(ViewIndex, Mesh);
+				}
 			}
 
 			/**
@@ -280,8 +418,6 @@ void FSplatSceneProxy::GetDynamicMeshElements(
 
 bool FSplatSceneProxy::IsVisible(const FSceneView& View) const
 {
-	check(Asset);
-
 	bool bIsShown = IsShown(&View);
 	bool bIsInScene = &GetScene() == View.Family->Scene;
 	bool bIsVisible = bIsShown && bIsInScene;
@@ -302,8 +438,16 @@ void FSplatSceneProxy::TryEnqueueSort(
 	const FVector3f& OriginCM, const FVector3f& Forward)
 {
 	check(!bIsSortingOnGPU);
-	check(Asset);
 	check(CPUSorting);
+
+	// The sort task copies a TConstArrayView pointing at the asset's CPU
+	// position buffer, so skip if the asset has been GC'd to avoid the task
+	// dereferencing freed memory.
+	USplatAsset* AssetPtr = Asset.Get();
+	if (!AssetPtr)
+	{
+		return;
+	}
 
 	if (!CPUSorting->IsReadyForSorting())
 	{
@@ -315,7 +459,7 @@ void FSplatSceneProxy::TryEnqueueSort(
 	// our destructor before it can be deleted.
 	// See AsyncWork.h.
 	(new FAutoDeleteAsyncTask<FCPUSortingTask>(
-		 Asset->GetPositions(),
+		 AssetPtr->GetPositions(),
 		 CPUSorting,
 		 OriginCM,
 		 Forward,

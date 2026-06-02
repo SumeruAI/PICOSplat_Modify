@@ -40,6 +40,8 @@ public:
 		, IdxDistB(NumSplats, EPixelFormat::PF_R32G32_UINT)
 		, CopyDst(nullptr)
 		, DrawSrc(nullptr)
+		, CopyDstNumSplats(0)
+		, DrawSrcNumSplats(0)
 		, DataCPU()
 		, CurrentState(ESortingState::Ready)
 		, bCopyInProgress()
@@ -149,6 +151,15 @@ public:
 	}
 
 	/**
+	 * @return Number of splats available in the current draw buffer.
+	 */
+	uint32 GetNumDrawableSplats() const
+	{
+		check(DrawSrc);
+		return DrawSrcNumSplats;
+	}
+
+	/**
 	 * Indicates whether a new sorting task can be launched.
 	 *
 	 * @return - Whether this is ready for a new sorting task.
@@ -202,7 +213,11 @@ public:
 	 * @param Src - The source to copy from.
 	 * @param Size - The number of bytes to copy.
 	 */
-	void BeginCopy(FRHIBuffer*& DstBuffer, void*& Src, uint32& Size)
+	void BeginCopy(
+		FRHIBuffer*& DstBuffer,
+		void*& Src,
+		uint32& Size,
+		uint32 NumDrawableSplats)
 	{
 		// Must not be copying.
 		bool bAlreadyCopying = bCopyInProgress.test_and_set();
@@ -214,6 +229,7 @@ public:
 
 		check(CopyDst);
 		check(CopyDst->VertexBufferRHI);
+		CopyDstNumSplats = NumDrawableSplats;
 		DstBuffer = CopyDst->VertexBufferRHI;
 		Src = &DataCPU[0];
 		Size = DataCPU.Num() * sizeof(DataCPU[0]);
@@ -262,6 +278,7 @@ public:
 			DrawSrc = CopyDst ? &IdxDistB : &IdxDistA;
 		}
 		std::swap(CopyDst, DrawSrc);
+		std::swap(CopyDstNumSplats, DrawSrcNumSplats);
 
 		Begin = &DataCPU[0];
 		End = Begin + DataCPU.Num();
@@ -272,6 +289,8 @@ private:
 	FSplatCPUToGPUBuffer IdxDistB;
 	FSplatCPUToGPUBuffer* CopyDst;
 	FSplatCPUToGPUBuffer* DrawSrc;
+	uint32 CopyDstNumSplats;
+	uint32 DrawSrcNumSplats;
 	TArray<FIndexedDistance> DataCPU;
 
 	// Task -> Render Thread: Sort finished and copy command enqueued.

@@ -4,82 +4,11 @@
 
 #include "SplatAssetFactory.h"
 
-#include "CompGeom/ConvexHull3.h"
+#include "Import/SplatRuntimeLoader.h"
 #include "Logging.h"
-#include "Misc/AssertionMacros.h"
-#include "SplatConstants.h"
-#include "import/ply/splat_ply_conversion.h"
-#include "import/ply/splat_ply_parsing.h"
-
-using namespace import;
-using import::GetPropertyFn;
-using import::Metadata;
-using import::ParseSplatFn;
-using import::ply::SplatParserPly;
-using PICO::Splat::MetersToCentimeters;
-
-namespace
-{
-void MaybeAddIndex(TMap<uint32, uint32>& IndexMap, uint32 Index)
-{
-	if (!IndexMap.Contains(Index))
-	{
-		IndexMap.Add(Index, IndexMap.Num());
-	}
-}
-
-TMap<uint32, uint32>
-RemapIndices(TConstArrayView<UE::Geometry::FIndex3i> Indices)
-{
-	TMap<uint32, uint32> IndexMap{};
-
-	for (const auto& Index3 : Indices)
-	{
-		MaybeAddIndex(IndexMap, Index3.A);
-		MaybeAddIndex(IndexMap, Index3.B);
-		MaybeAddIndex(IndexMap, Index3.C);
-	}
-
-	return IndexMap;
-}
-
-bool GenerateConvexHull(
-	TConstArrayView<FVector3f> Positions,
-	TArray<FVector3f>& OutVertices,
-	TArray<uint32>& OutIndices)
-{
-	UE::Geometry::TConvexHull3<float> ConvexHull{};
-	bool Success = ConvexHull.Solve<FVector3f>(Positions);
-	if (!Success)
-	{
-		PICO_LOGE("Failed to solve for convex hull.");
-		return false;
-	}
-
-	TArray<UE::Geometry::FIndex3i> HullIndices = ConvexHull.MoveTriangles();
-
-	// Convert indices to only reference vertices in hull.
-
-	TMap<uint32, uint32> IndexMap = RemapIndices(HullIndices);
-
-	OutIndices.SetNumUninitialized(HullIndices.Num() * 3);
-	for (int32 Index = 0; Index < HullIndices.Num(); ++Index)
-	{
-		OutIndices[Index * 3 + 0] = IndexMap[HullIndices[Index].A];
-		OutIndices[Index * 3 + 1] = IndexMap[HullIndices[Index].B];
-		OutIndices[Index * 3 + 2] = IndexMap[HullIndices[Index].C];
-	}
-
-	OutVertices.SetNumUninitialized(IndexMap.Num());
-	for (const auto& Pair : IndexMap)
-	{
-		OutVertices[Pair.Value] = MetersToCentimeters * Positions[Pair.Key];
-	}
-
-	return true;
-}
-
-} // namespace
+#include "Misc/Paths.h"
+#include "Misc/ScopedSlowTask.h"
+#include "SplatSettings.h"
 
 USplatAssetFactory::USplatAssetFactory()
 {
@@ -101,62 +30,138 @@ UObject* USplatAssetFactory::FactoryCreateBinary(
 	FFeedbackContext* Warn)
 {
 	PICO_LOGL("Loading splats from %s.", *InName.ToString());
+	FScopedSlowTask ImportTask(
+		100.0f,
+		FText::Format(
+			NSLOCTEXT("PICOSplatEditor", "ImportPLYProgress", "Importing {0}"),
+			FText::FromName(InName)));
+	ImportTask.MakeDialog(true);
 
-	SplatParserPly Parser;
-
-	Metadata PLYMetadata;
-	std::span<const uint8_t> BufferView(Buffer, BufferEnd);
-	if (!Parser.parse_metadata(BufferView, PLYMetadata))
+	const int64 BufferSize = BufferEnd - Buffer;
+	FRuntimeSplatBuildData BuildData;
+	FString ErrorMessage;
+	ImportTask.EnterProgressFrame(
+		35.0f,
+		NSLOCTEXT("PICOSplatEditor", "ImportPLYParse", "Parsing PLY data..."));
+	if (!FSplatRuntimeLoader::LoadFromPLYMemory(
+			MakeArrayView(Buffer, static_cast<int32>(BufferSize)),
+			BuildData,
+			ErrorMessage))
 	{
-		PICO_LOGE("Failed to parse metadata from %s.", *InName.ToString());
+		PICO_LOGE("Failed to import %s: %s", *InName.ToString(), *ErrorMessage);
+		return nullptr;
+	}
+	if (ImportTask.ShouldCancel())
+	{
 		return nullptr;
 	}
 
-	if (!ply::validate_metadata(PLYMetadata))
-	{
-		PICO_LOGE("Invalid metadata for %s.", *InName.ToString());
-		return nullptr;
-	}
-
-	TArray<FVector3f> Positions;
-	Positions.SetNumUninitialized(PLYMetadata.num_splats);
-	TArray<FQuat4f> Rotations;
-	Rotations.SetNumUninitialized(PLYMetadata.num_splats);
-	TArray<FVector3f> Scales;
-	Scales.SetNumUninitialized(PLYMetadata.num_splats);
-	TArray<FColor> Colors;
-	Colors.SetNumUninitialized(PLYMetadata.num_splats);
-
-	ParseSplatFn ParseSplat =
-		[P = std::span<FVector3f>(&Positions[0], Positions.Num()),
-	     R = std::span<FQuat4f>(&Rotations[0], Rotations.Num()),
-	     S = std::span<FVector3f>(&Scales[0], Scales.Num()),
-	     C = std::span<FColor>(&Colors[0], Colors.Num())](
-			uint32_t Index, GetPropertyFn Get)
-	{ ply::convert_splat<FVector3f, FQuat4f, FColor>(Index, Get, P, R, S, C); };
-
-	if (!Parser.parse_data(ParseSplat))
-	{
-		PICO_LOGE("Failed to parse splats from %s.", *InName.ToString());
-		return nullptr;
-	}
-
+	ImportTask.EnterProgressFrame(
+		10.0f,
+		NSLOCTEXT("PICOSplatEditor", "ImportPLYAllocate", "Creating splat asset..."));
 	USplatAsset* Asset = NewObject<USplatAsset>(InParent, InName, Flags);
-	Asset->SetNumSplats(PLYMetadata.num_splats);
-	Asset->SetPositionsMeters(std::move(Positions));
-	Asset->SetCovariancesQuatScaleMeters(Rotations, Scales);
-	Asset->SetColorsLinear(std::move(Colors));
-
-	if (!GenerateConvexHull(
-			Asset->PositionsFullPrecision,
-			Asset->ConvexHullVertices,
-			Asset->ConvexHullIndices))
+	if (!Asset)
 	{
-		PICO_LOGE("Failed to generate convex hull for %s.", *InName.ToString());
+		PICO_LOGE("Failed to allocate asset for %s.", *InName.ToString());
 		return nullptr;
 	}
 
-	Asset->BeginInit();
+	Asset->SetSourceFilePath(UFactory::GetCurrentFilename());
+
+	// Optionally cache the unfiltered source data before initialization, so the
+	// asset can be rebuilt later without reading the source PLY. Stripped from
+	// cooked builds via WITH_EDITORONLY_DATA serialization.
+	ImportTask.EnterProgressFrame(
+		10.0f,
+		NSLOCTEXT("PICOSplatEditor", "ImportPLYSourceData", "Recording source reference..."));
+	if (USplatSettings::ShouldKeepImportSourceData())
+	{
+		Asset->SetSourceImportData(BuildData);
+	}
+
+	ImportTask.EnterProgressFrame(
+		40.0f,
+		NSLOCTEXT("PICOSplatEditor", "ImportPLYBuild", "Building render and collision data..."));
+	if (!Asset->InitializeFromRuntimeData(BuildData, ErrorMessage))
+	{
+		PICO_LOGE("Failed to initialize %s: %s", *InName.ToString(), *ErrorMessage);
+		return nullptr;
+	}
+
+	ImportTask.EnterProgressFrame(
+		5.0f,
+		NSLOCTEXT("PICOSplatEditor", "ImportPLYFinish", "Finishing import..."));
 
 	return Asset;
+}
+
+bool USplatAssetFactory::CanReimport(UObject* Obj, TArray<FString>& OutFilenames)
+{
+	USplatAsset* Asset = Cast<USplatAsset>(Obj);
+	if (!Asset)
+	{
+		return false;
+	}
+
+	if (!Asset->GetSourceFilePath().IsEmpty())
+	{
+		OutFilenames.Add(Asset->GetSourceFilePath());
+	}
+	return true;
+}
+
+void USplatAssetFactory::SetReimportPaths(
+	UObject* Obj,
+	const TArray<FString>& NewReimportPaths)
+{
+	USplatAsset* Asset = Cast<USplatAsset>(Obj);
+	if (Asset && NewReimportPaths.Num() > 0)
+	{
+		Asset->SetSourceFilePath(NewReimportPaths[0]);
+	}
+}
+
+EReimportResult::Type USplatAssetFactory::Reimport(UObject* Obj)
+{
+	USplatAsset* Asset = Cast<USplatAsset>(Obj);
+	if (!Asset)
+	{
+		return EReimportResult::Failed;
+	}
+
+	const FString SourceFilePath = Asset->GetSourceFilePath();
+	if (!SourceFilePath.IsEmpty() && !FPaths::FileExists(SourceFilePath))
+	{
+		UE_LOG(LogPICOSplat, Warning,
+			TEXT("Cannot reimport splat asset %s: source PLY file is missing: %s"),
+			*Asset->GetPathName(),
+			*SourceFilePath);
+		return EReimportResult::Failed;
+	}
+	if (SourceFilePath.IsEmpty() && !Asset->HasSourceData())
+	{
+		UE_LOG(LogPICOSplat, Warning,
+			TEXT("Cannot reimport splat asset %s: no source PLY path or cached source data is available."),
+			*Asset->GetPathName());
+		return EReimportResult::Failed;
+	}
+
+	FString Error;
+	if (!Asset->RebuildFromSource(USplatAsset::MakeCollisionBuildSettingsSnapshot(), Error))
+	{
+		UE_LOG(LogPICOSplat, Warning,
+			TEXT("Failed to reimport splat asset %s from %s: %s"),
+			*Asset->GetPathName(),
+			*SourceFilePath,
+			*Error);
+		return EReimportResult::Failed;
+	}
+
+	Asset->MarkPackageDirty();
+	return EReimportResult::Succeeded;
+}
+
+int32 USplatAssetFactory::GetPriority() const
+{
+	return ImportPriority;
 }

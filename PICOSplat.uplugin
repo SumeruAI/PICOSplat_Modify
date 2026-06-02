@@ -8,29 +8,37 @@
 	"CreatedBy": "PICO",
 	"CreatedByURL": "https://www.picoxr.com/",
 	"DocsURL": "https://developer.picoxr.com/document/unreal/pico-splat/",
-	"EngineVersion": "5.5.0",
-	"FabURL": "com.epicgames.launcher://ue/Fab/product/8055bcb7-f16d-4a3e-bea1-b4139c84e172",
+	"MarketplaceURL": "",
 	"SupportURL": "https://developer.picoxr.com/support/",
+	"EngineVersion": "5.4.0",
 	"CanContainContent": false,
-	"IsBetaVersion": false,
+	"Installed": true,
 	"Modules": [
 		{
 			"Name": "PICOSplatEditor",
 			"Type": "Editor",
 			"LoadingPhase": "Default",
-			"PlatformAllowList": [ "Win64" ]
+			"PlatformAllowList": [
+				"Win64"
+			]
 		},
 		{
 			"Name": "PICOSplatRuntime",
 			"Type": "Runtime",
 			"LoadingPhase": "PostConfigInit",
-			"PlatformAllowList": [ "Win64", "Android" ]
+			"PlatformAllowList": [
+				"Win64",
+				"Android"
+			]
 		},
 		{
 			"Name": "PICOSplatThirdParty",
-			"Type": "Editor",
+			"Type": "Runtime",
 			"LoadingPhase": "Default",
-			"PlatformAllowList": [ "Win64" ]
+			"PlatformAllowList": [
+				"Win64",
+				"Android"
+			]
 		}
 	]
 }

@@ -11,12 +11,14 @@
 
 namespace PICO::Splat
 {
-void EnqueueCopy(std::shared_ptr<FMultithreadedSortingBuffers>& Buffers)
+void EnqueueCopy(
+	std::shared_ptr<FMultithreadedSortingBuffers>& Buffers,
+	uint32 NumDrawableSplats)
 {
 	FRHIBuffer* DstBuffer = nullptr;
 	void* Src = nullptr;
 	uint32 Size = 0;
-	Buffers->BeginCopy(DstBuffer, Src, Size);
+	Buffers->BeginCopy(DstBuffer, Src, Size, NumDrawableSplats);
 
 	/**
 	 * Buffer is passed in via capture, as it's containing CopyDst may be moved
@@ -73,15 +75,14 @@ void FCPUSortingTask::DoWork()
 	}
 
 	// Partition out some splats not visible.
-	End = std::partition(Begin, End, FIndexedDistance::IsMaybeVisible);
+	FIndexedDistance* VisibleEnd =
+		std::partition(Begin, End, FIndexedDistance::IsMaybeVisible);
 
 	// Sort.
-	std::sort(Begin, End);
+	std::sort(Begin, VisibleEnd);
 
 	// Enqueue copy to GPU.
-	// TODO(seth): Copy & draw should be aware of how many splats actually need to
-	// be rendered.
-	EnqueueCopy(Buffers);
+	EnqueueCopy(Buffers, static_cast<uint32>(VisibleEnd - Begin));
 
 	// Cleanup.
 	bool bNeedsTearDown = Buffers->EndSorting();
